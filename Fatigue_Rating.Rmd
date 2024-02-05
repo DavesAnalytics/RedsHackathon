@@ -132,3 +132,89 @@ fatigue_rating <- percentiles %>%
  # summarise(mean_velo_fatigue = mean(abs(values), na.rm = T))
 ```
 
+# Read in full imputed data
+```{r}
+imputed_pitches <- read_csv("imputed_pitches.csv")
+```
+
+# Create a dataset of only SP information to predict fatigue_rating
+```{r}
+SP_mod_df <- left_join(fatigue_rating, imputed_pitches %>% select(-1)) %>% na.omit() %>%
+  select(-c(GS, W, L, CG, ShO, SV, BS, HLD, SD, MD, Pulls, ERA)) %>%
+  mutate(across(c(IP:Pitches, -TBF), ~./TBF, .names = "{.col}_TBF")) %>%
+  mutate(across(c(G, H:Pitches), ~./IP, .names = "{.col}_IP")) %>%
+  mutate(across(c(IP:Pitches), ~./G, .names = "{.col}_G")) %>%
+  select(-Throws, -c(G:RS)) %>% ungroup() 
+```
+
+# Build a Lasso regression model predicting fatigue for SP
+
+```{r}
+X <- model.matrix(fatigue_rating ~ . -1, data = SP_mod_df %>% select(-PlayerId, -Name)) 
+y <- SP_mod_df$fatigue_rating
+
+set.seed(123) 
+cv_lasso <- cv.glmnet(X, y, alpha = 0) 
+
+best_lambda <- cv_lasso$lambda.min
+
+lasso_best <- glmnet(X, y,  alpha = 0, lambda = best_lambda)
+
+trainIndex <- createDataPartition(y, p = .75, list = FALSE)
+X_train <- X[trainIndex, ]
+y_train <- y[trainIndex]
+X_test <- X[-trainIndex, ]
+y_test <- y[-trainIndex]
+
+# Refit the model on training data
+cv_lasso_train <- cv.glmnet(X_train, y_train,  alpha =0)
+
+# Predict on test data
+predictions <- predict(cv_lasso_train, newx = X_test, s = "lambda.min", type = "response")
+
+# Calculate the squared differences
+squared_errors <- (predictions - y_test)^2
+
+# Calculate the mean of these squared differences (MSE)
+mse <- mean(squared_errors)
+
+# Print the MSE
+print(paste("MSE:", mse))
+
+ggplot(data.frame(predictions = predictions, y_test = y_test), aes(x = predictions, y = y_test)) + geom_point() +
+  geom_abline()
+```
+
+
+# Get dataset of relievers to predict fatigue rating
+```{r}
+RP_mod_df <- left_join(fangraphs_season_level %>% select(PlayerId, Name, Age, Season, Role), 
+                       imputed_pitches %>% select(-1)) %>%
+  na.omit() %>%
+  filter(Season == 2023) %>%
+  distinct(PlayerId, .keep_all = T) %>%
+  filter(GS < 5) %>%
+  filter(Age < 30) %>%
+  select(-c(GS, W, L, CG, ShO, SV, BS, HLD, SD, MD, Pulls, ERA)) %>%
+  mutate(across(c(IP:Pitches, -TBF), ~./TBF, .names = "{.col}_TBF")) %>%
+  mutate(across(c(G, H:Pitches), ~./IP, .names = "{.col}_IP")) %>%
+  mutate(across(c(IP:Pitches), ~./G, .names = "{.col}_G")) %>%
+  select(-Throws, -c(G:RS), -Season, -Role) %>% ungroup() 
+```
+
+# Make predictions on the relievers expected fatigue rating using the starter model
+
+```{r}
+X_RP <- model.matrix(~ . -1, data = RP_mod_df %>% select(-PlayerId, -Name))
+
+# Use the SP model to predict fatigue ratings for RPs
+predictions_RP <- predict(lasso_best, newx = X_RP, s = "lambda.min", type = "response")
+
+RP_predicted_fatigue <- data.frame(
+  PlayerId = RP_mod_df$PlayerId,
+  Name = RP_mod_df$Name,
+  Age = RP_mod_df$Age,
+  Expected_Fatigue_Rate = c(predictions_RP)
+)
+```
+
