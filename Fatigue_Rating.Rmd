@@ -1,0 +1,134 @@
+---
+title: "Fatigue"
+output: html_document
+date: "2024-02-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in Data
+```{r}
+savant_pitch_level <- read_csv("savant_pitch_level.csv")
+fangraphs_season_level <- read_csv("fangraphs_season_level.csv")
+```
+
+# Select variables of savant of interest
+```{r}
+pitches <- savant_pitch_level %>% 
+  select(
+    pitcher, game_date, pitch_number_appearance, pitcher_at_bat_number, 
+    pitch_type, release_speed, release_pos_x, release_pos_z,
+    pfx_x, pfx_z, plate_x, plate_z, vx0, vy0, vz0, ax, ay, az, effective_speed, release_spin_rate,
+    release_extension, release_pos_y
+         ) %>%
+  na.omit() %>%
+  mutate(year = as.numeric(substr(game_date, 1, 4))) %>% select(-game_date)
+```
+
+# Response variables to calculate a fatigue rating for
+```{r}
+responses <- c("release_speed", "release_pos_x", "release_pos_z", "pfx_x", "pfx_z", "plate_x", "plate_z", "vx0", "vy0", "vz0", "ax", "ay", "az", "effective_speed", "release_spin_rate", "release_extension", "release_pos_y")
+```
+
+# Calculate fatigue ra†ing for each pitcher and pitch type for response variables
+```{r}
+pitcherids <- unique(pitches$pitcher)
+fatigues_pitchers <- data.frame(pitcherid = integer(), 
+                                pitch_type = character(), 
+                                fatigue_coef = numeric())
+
+total <- length(pitcherids)
+pb <- txtProgressBar(min = 0, max = total, style = 3)
+
+
+for (i in seq_along(pitcherids)) {
+  pitcher_data <- pitches %>% filter(pitcher == pitcherids[i])
+  pitcher_years <- unique(pitcher_data$year)
+  pitcher_types <- unique(pitcher_data$pitch_type)
+  # if pitcher_data empty skip
+  if (nrow(pitcher_data) == 0) {
+    setTxtProgressBar(pb, i)
+    next
+  }
+  for (pitcher_year in pitcher_years) {
+    pitcher_year_data <- pitcher_data %>% filter(year == pitcher_year)
+    for (pitcher_type in pitcher_types) {
+      for (response in responses) {
+        pitcher_type_data <- pitcher_year_data %>% filter(pitch_type == pitcher_type)
+        if (nrow(pitcher_type_data) == 0) {
+          next
+        }
+        pitchermod <- lm(as.formula(paste(response, "~ pitch_number_appearance")), data = pitcher_type_data)
+        fatigues_pitchers <- rbind(fatigues_pitchers, 
+                                   data.frame(
+                                     pitcherid = pitcherids[i], 
+                                     year = pitcher_year, 
+                                     pitch_type = pitcher_type,
+                                     response_type = response, 
+                                     fatigue_coef = coef(pitchermod)["pitch_number_appearance"])
+                                   )
+      }
+    }
+  }
+  # Update the progress bar after each iteration
+  setTxtProgressBar(pb, i)
+
+  
+}
+close(pb)
+```
+
+# Pivot the data to wide format
+```{r}
+fatigues_full <- fatigues_pitchers %>% 
+  filter(!pitch_type %in% c("PO", "FO", "KN", "SC", "EP", "UN", "FS", "SF", "KC")) %>%
+  pivot_wider(names_from = pitch_type, values_from = fatigue_coef, names_prefix = "fatigue_") %>%
+  pivot_wider(names_from = response_type, values_from = contains("fatigue_"))
+```
+
+# Join the fatigue data to the fangraphs data
+```{r}
+fangraphs_season_level <- left_join(fangraphs_season_level, fatigues_full, 
+                               by = c("MLBAMID" = "pitcherid", "Season" = "year"))
+```
+
+
+# Write CSV of data before missing data imputation
+```{r}
+#write.csv(fangraphs_season_level, "preimputation_fangraphs.csv")
+```
+
+
+
+
+**Load in preimputation_fangraphs.csv if you want to skip above code**
+```{r}
+preimputation_fangraphs <- read_csv("preimputation_fangraphs.csv")
+```
+
+# Calculate Percentiles
+```{r}
+percentiles <- preimputation_fangraphs %>% filter(Season == 2023) %>%
+  filter(GS >= 5) %>%
+  filter(Role == "SP") %>%
+  select(PlayerId, Name, Season, Age, contains("fatigue")) %>%
+  mutate(across(contains("fatigue"), ~ percent_rank(.)*100)) 
+```
+
+# Calculate Fatigue rating by taking the mean of all percentiles
+```{r}
+fatigue_rating <- percentiles %>%
+  pivot_longer(cols = contains("fatigue"), names_to = "variable", values_to = "values") %>%
+  group_by(PlayerId, Name, Age) %>%
+  summarise(fatigue_rating = mean(abs(values), na.rm = T))
+
+
+# if you just want a rating for spin rate for example
+#mean_spin_fatigue <- percentiles %>%
+ # pivot_longer(cols = contains("release_spin_rate"), names_to = "variable", values_to = "values") %>%
+#  group_by(PlayerId, Name) %>%
+ # summarise(mean_velo_fatigue = mean(abs(values), na.rm = T))
+```
+
